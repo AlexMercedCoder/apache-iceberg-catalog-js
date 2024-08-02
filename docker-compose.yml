@@ -1,0 +1,11 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    ports:
+      - "7654:7654"
+    environment:
+      - NODE_ENV=production
+      - PORT=7654
+    command: npm start
