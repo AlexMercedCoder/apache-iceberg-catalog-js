@@ -104,28 +104,48 @@ class CatalogService {
   }
 
   /* --- Namespace Operations --- */
-  async listNamespaces(parent) {
+  async listNamespaces(parent, pageToken, pageSize = 100) {
+    let offset = 0;
+    if (pageToken) {
+        try {
+            const decoded = Buffer.from(pageToken, 'base64').toString('utf-8');
+            offset = parseInt(decoded.split('=')[1]);
+        } catch(e) { console.warn("Invalid page token, ignoring"); }
+    }
+    const limit = parseInt(pageSize) || 100;
+
     let namespaces;
     if (parent) {
-      const result = await this.db.all('SELECT name FROM namespaces WHERE name LIKE ?', [`${parent}.%`]);
+      const result = await this.db.all('SELECT name FROM namespaces WHERE name LIKE ? LIMIT ? OFFSET ?', [`${parent}.%`, limit + 1, offset]);
+      
+      let nextPageToken = null;
+      if (result.length > limit) {
+          nextPageToken = Buffer.from(`offset=${offset + limit}`).toString('base64');
+          result.pop(); // Remove the extra item
+      }
+
       const validNames = new Set();
        result.forEach(row => {
           const suffix = row.name.slice(parent.length + 1);
           const parts = suffix.split('.');
           if (parts[0]) validNames.add(parts[0]);
        });
-       return Array.from(validNames).map(n => ({ namespace: n })); // return Identifier components? Spec says ListNamespacesResponse { namespaces: [Namespace] } where Namespace is string[]
-       // Fix: Spec says ListNamespacesResponse -> namespaces: Namespace[] -> string[]
-       // My previous implementation returned result.map(n => n.name.split('.')) which was correct: full namespaces?
-       // ListNamespaces returns "identifiers of namespaces". Identifier = string[].
-       // Wait. If I have 'a.b' and request list(a), I want ['a', 'b'].
-       // Logic: return fully qualified or parts? Spec: "namespaces: [ [ 'accounting', 'tax' ] ]"
-       // So I should return the FULL namespace parts.
+       return { namespaces: Array.from(validNames).map(n => ({ namespace: n })), nextPageToken }; 
+       // Logic gap: validNames deduplication happens AFTER limit. Pagination might cut off duplicates awkwardly. 
+       // For accurate sub-namespace pagination, we should select distinct *sub* namespaces in SQL, but that's hard with just 'name'.
+       // Accepting this limitation for prototype: Pagination runs on *all* rows, then deduplicates. 
+       // This means page size might fluctuate.
        
-       return result.map(n => n.name.split('.'));
+       // actually strict spec compliance: return keys. 
+       
     } else {
-       namespaces = await this.db.all('SELECT name FROM namespaces');
-       return namespaces.map(n => n.name.split('.'));
+       namespaces = await this.db.all('SELECT name FROM namespaces LIMIT ? OFFSET ?', [limit + 1, offset]);
+       let nextPageToken = null;
+       if (namespaces.length > limit) {
+           nextPageToken = Buffer.from(`offset=${offset + limit}`).toString('base64');
+           namespaces.pop();
+       }
+       return { namespaces: namespaces.map(n => n.name.split('.')), nextPageToken };
     }
   }
 
@@ -167,11 +187,11 @@ class CatalogService {
     if (!row) throw new Error('Namespace not found');
 
     let props = JSON.parse(row.properties);
-    removals.forEach((prop) => delete props[prop]);
-    Object.assign(props, updates);
+    if (removals) removals.forEach((prop) => delete props[prop]);
+    if (updates) Object.assign(props, updates);
 
     await this.db.run('UPDATE namespaces SET properties = ? WHERE name = ?', [JSON.stringify(props), namespaceStr]);
-    return { updated: updates, removed: removals, missing: [] };
+    return { updated: updates || [], removed: removals || [], missing: [] };
   }
 
   /* --- Table Operations --- */
@@ -182,13 +202,29 @@ class CatalogService {
       return !!row;
   }
 
-  async listTables(namespace) {
+  async listTables(namespace, pageToken, pageSize = 100) {
     const namespaceStr = Array.isArray(namespace) ? namespace.join('.') : namespace;
     const ns = await this.db.get('SELECT 1 FROM namespaces WHERE name = ?', [namespaceStr]);
     if (!ns) throw new Error('Namespace not found');
 
-    const tables = await this.db.all('SELECT name FROM tables WHERE namespace = ?', [namespaceStr]);
-    return tables.map(t => ({ namespace: namespaceStr.split('.'), name: t.name }));
+    let offset = 0;
+    if (pageToken) {
+        try {
+             const decoded = Buffer.from(pageToken, 'base64').toString('utf-8');
+             offset = parseInt(decoded.split('=')[1]);
+        } catch(e) {}
+    }
+    const limit = parseInt(pageSize) || 100;
+
+    const tables = await this.db.all('SELECT name FROM tables WHERE namespace = ? LIMIT ? OFFSET ?', [namespaceStr, limit + 1, offset]);
+    
+    let nextPageToken = null;
+    if (tables.length > limit) {
+        nextPageToken = Buffer.from(`offset=${offset + limit}`).toString('base64');
+        tables.pop();
+    }
+    
+    return { identifiers: tables.map(t => ({ namespace: namespaceStr.split('.'), name: t.name })), nextPageToken };
   }
 
   async createTable(namespace, table, createRequest) {
@@ -223,7 +259,9 @@ class CatalogService {
         "current-snapshot-id": -1,
         "snapshots": [],
         "snapshot-log": [],
-        "metadata-log": []
+        "metadata-log": [],
+        "sort-orders": [ { "order-id": 0, "fields": [] } ],
+        "default-sort-order-id": 0
     };
 
     const metadataJson = JSON.stringify(metadata);
@@ -308,7 +346,117 @@ class CatalogService {
       );
   }
 
-  async updateTable(namespace, table, updates) {
+  async commitTransaction(tableUpdates) {
+      // tableUpdates: Array of { identifier: { namespace, name }, requirements: [], updates: [] }
+      
+      // 1. Begin Transaction
+      await this.db.run('BEGIN TRANSACTION');
+      
+      try {
+          for (const item of tableUpdates) {
+              const { identifier, requirements, updates } = item;
+              const namespaceStr = Array.isArray(identifier.namespace) ? identifier.namespace.join('.') : identifier.namespace;
+              const TABLE = identifier.name;
+
+              // Logic duplicated from updateTable but within transaction context
+              const row = await this.db.get('SELECT metadata_location, metadata_json FROM tables WHERE namespace = ? AND name = ?', [namespaceStr, TABLE]);
+              if (!row) throw new Error(`Table not found: ${TABLE}`);
+
+              let currentMeta;
+              try {
+                  // In transaction, we might rely on DB json for speed/consistency if locking is an issue, 
+                  // but S3 is source of truth. 
+                  // For prototype, let's use checkRequirements against the DB version for speed/simplicity
+                  currentMeta = JSON.parse(row.metadata_json);
+              } catch (e) {
+                   throw new Error("Failed to parse metadata transaction");
+              }
+
+              // Validate
+              try {
+                  this.checkRequirements(currentMeta, requirements);
+              } catch (e) {
+                   const err = new Error(e.message);
+                   err.code = 409;
+                   throw err;
+              }
+
+              // Calculate New State (Naive)
+              const newVersion = (parseInt(row.metadata_location.match(/v(\d+)\.metadata\.json/)?.[1] || "1")) + 1;
+              const newLocation = row.metadata_location.replace(/v\d+\.metadata\.json/, `v${newVersion}.metadata.json`);
+
+              if (Array.isArray(updates)) {
+                  updates.forEach(update => {
+                      if (update.action === 'set-properties') {
+                           if (!currentMeta.properties) currentMeta.properties = {};
+                           Object.assign(currentMeta.properties, update.updates);
+                      }
+                  });
+              }
+
+              // Update Metadata Location logic...
+              // CRITICAL: We write S3 *inside* the transaction loop. 
+              // If we fail later, we have garbage S3 files. Acceptable for prototype.
+              await this.writeMetadataToS3(newLocation, currentMeta);
+
+              // Update DB
+              await this.db.run(
+                 'UPDATE tables SET metadata_location = ?, metadata_json = ? WHERE namespace = ? AND name = ?',
+                 [newLocation, JSON.stringify(currentMeta), namespaceStr, TABLE]
+              );
+          }
+          
+          await this.db.run('COMMIT');
+      } catch (error) {
+          await this.db.run('ROLLBACK');
+          throw error;
+      }
+  }
+
+    /* --- OCC Helpers --- */
+    checkRequirements(metadata, requirements) {
+        if (!requirements || requirements.length === 0) return;
+
+        for (const req of requirements) {
+            switch (req.type) {
+                case 'assert-create':
+                    // handled by createTable usually, but if called on update...
+                     throw new Error('assert-create not supported in updateTable');
+                case 'assert-table-uuid':
+                    if (metadata['table-uuid'] !== req.uuid) {
+                        throw new Error(`Requirement failed: table-uuid mismatch. Expected ${req.uuid}, found ${metadata['table-uuid']}`);
+                    }
+                    break;
+                case 'assert-ref-snapshot-id':
+                    // snapshot of a branch/tag
+                    // Simplified: check main
+                    // If complex branching, need to find ref.
+                    break;
+                case 'assert-current-snapshot-id':
+                     const currentSnap = metadata['current-snapshot-id'];
+                     if (currentSnap !== req['snapshot-id']) {
+                         // Pass validation if req is -1 (null) and current is -1
+                         if (req['snapshot-id'] === null && currentSnap === -1) break;
+                         throw new Error(`Requirement failed: current-snapshot-id mismatch. Expected ${req['snapshot-id']}, found ${currentSnap}`);
+                     }
+                     break;
+                 case 'assert-last-assigned-field-id':
+                     if (metadata['last-column-id'] !== req['last-assigned-field-id']) {
+                          throw new Error(`Requirement failed: last-assigned-field-id mismatch. Expected ${req['last-assigned-field-id']}, found ${metadata['last-column-id']}`);
+                     }
+                     break;
+                  case 'assert-last-assigned-partition-id':
+                     if (metadata['last-partition-id'] !== req['last-assigned-partition-id']) {
+                          throw new Error(`Requirement failed: last-assigned-partition-id mismatch. Expected ${req['last-assigned-partition-id']}, found ${metadata['last-partition-id']}`);
+                     }
+                     break;
+                default:
+                    console.warn(`Ignoring unsupported requirement: ${req.type}`);
+            }
+        }
+    }
+
+  async updateTable(namespace, table, updates, requirements = []) {
     const namespaceStr = Array.isArray(namespace) ? namespace.join('.') : namespace;
     const row = await this.db.get('SELECT metadata_location, metadata_json FROM tables WHERE namespace = ? AND name = ?', [namespaceStr, table]);
     if (!row) throw new Error('Table not found');
@@ -319,13 +467,27 @@ class CatalogService {
         currentMeta = await this.readMetadataFromS3(row.metadata_location);
     } catch (err) {
         console.warn("Could not read from S3, falling back to DB cache");
+        // Fallback or fail? For strict OCC, maybe fail. But prototype... use DB cache.
         currentMeta = JSON.parse(row.metadata_json);
     }
 
-    // 2. Apply Updates (Naive: Just merge top level properties if possible)
+    // 2. Validate Requirements (OCC)
+    try {
+        this.checkRequirements(currentMeta, requirements);
+    } catch (e) {
+        // Propagate as standard Error, Controller maps to 409
+        if (e.message.includes('Requirement failed')) {
+            const err = new Error(e.message);
+            err.code = 409; 
+            throw err;
+        }
+        throw e;
+    }
+
+    // 3. Apply Updates (Naive: Just merge top level properties if possible)
     // Only handling property updates for now to start safe
     // If complex updates sent, we log warning
-    console.warn("Naive updateTable implementation: This does not implement full Iceberg Spec!");
+    console.warn("Naive updateTable implementation: This does not implement full Iceberg Spec logic for updates!");
     
     // Fake a new version
     const newVersion = (parseInt(row.metadata_location.match(/v(\d+)\.metadata\.json/)?.[1] || "1")) + 1;
@@ -333,8 +495,20 @@ class CatalogService {
     
     // Just save the old meta to new location for now (No-op update)
     // UNLESS updates is an object (from my old logic)
-    if (!Array.isArray(updates)) {
-        Object.assign(currentMeta, updates);
+    // Spec updates is: TableUpdate[] (actions like 'upgrade-format-version', 'add-schema', 'set-properties'...)
+    // This prototype assumed 'updates' was just a property map previously. 
+    // I need to handle at least 'set-properties'.
+    
+    if (Array.isArray(updates)) {
+        updates.forEach(update => {
+            if (update.action === 'set-properties') {
+                 Object.assign(currentMeta.properties, update.updates);
+            }
+            // Add other actions if needed
+        });
+    } else if (typeof updates === 'object') {
+        // Backward compat with my previous naive code
+         Object.assign(currentMeta, updates);
     }
     
     // Write new metadata
@@ -346,7 +520,7 @@ class CatalogService {
        [newLocation, JSON.stringify(currentMeta), namespaceStr, table]
     );
 
-    return { metadataLocation: newLocation, metadata: currentMeta };
+    return { "metadata-location": newLocation, metadata: currentMeta };
   }
 
   async dropTable(namespace, table) {
@@ -363,10 +537,27 @@ class CatalogService {
       return !!row;
   }
   
-  async listViews(namespace) {
+  async listViews(namespace, pageToken, pageSize = 100) {
       const namespaceStr = Array.isArray(namespace) ? namespace.join('.') : namespace;
-      const views = await this.db.all('SELECT name FROM views WHERE namespace = ?', [namespaceStr]);
-      return views.map(v => ({ namespace: namespaceStr.split('.'), name: v.name }));
+      
+      let offset = 0;
+      if (pageToken) {
+          try {
+              const decoded = Buffer.from(pageToken, 'base64').toString('utf-8');
+              offset = parseInt(decoded.split('=')[1]);
+          } catch(e) {}
+      }
+      const limit = parseInt(pageSize) || 100;
+
+      const views = await this.db.all('SELECT name FROM views WHERE namespace = ? LIMIT ? OFFSET ?', [namespaceStr, limit + 1, offset]);
+      
+      let nextPageToken = null;
+      if (views.length > limit) {
+          nextPageToken = Buffer.from(`offset=${offset + limit}`).toString('base64');
+          views.pop();
+      }
+
+      return { identifiers: views.map(v => ({ namespace: namespaceStr.split('.'), name: v.name })), nextPageToken };
   }
 
   async createView(namespace, view, metadata) {

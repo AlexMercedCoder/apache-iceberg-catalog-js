@@ -2,9 +2,10 @@ version: '3.8'
 
 services:
   catalog:
-    build: .
+    image: alexmerced/js-iceberg-catalog:latest
     ports:
       - "7654:7654"
+      - "3000:7654" # Map 3000 as well since README mentions it often
     environment:
       - NODE_ENV=production
       - PORT=7654
@@ -13,7 +14,6 @@ services:
       - AWS_SECRET_ACCESS_KEY=password
       - AWS_REGION=us-east-1
       - AWS_S3_ENDPOINT=http://minio:9000
-    command: npm start
     container_name: catalog
     networks:
       test-catalog:

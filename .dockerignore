@@ -1,0 +1,16 @@
+node_modules
+npm-debug.log
+app.log
+.git
+.gitignore
+.dockerignore
+docker-compose.yml
+test_scripts
+venv
+*.db
+*.env
+.vscode
+dist
+coverage
+rest-catalog-open-api.yaml
+readme.md

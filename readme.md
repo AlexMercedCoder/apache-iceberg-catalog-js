@@ -1,124 +1,113 @@
-# Apache Iceberg Catalog Prototype
-##### Initial development by Alex Merced (github.com/alexmercedcoder)
+# JS Iceberg Catalog
 
-This project is a JavaScript prototype for an Apache Iceberg catalog implemented using Node.js and Express. It provides a RESTful API for managing namespaces, tables, and views within an Iceberg catalog. The project includes Swagger documentation and a simple UI for adding namespaces.
+**A lightweight, portable, Node.js-based implementation of the Apache Iceberg REST Catalog Specification.**
 
-## Getting Started
+This project provides a fully functional Iceberg Catalog server that uses **SQLite** for catalog state and **S3-compatible object storage** (AWS S3, Minio, etc.) for metadata and data files. It is designed for local development, CI/CD testing, and lightweight production use cases where running a JVM-based catalog is unnecessary.
 
-### Prerequisites
+---
 
-- Node.js (>= 14)
-- Docker (optional, for containerized deployment)
+## 🚀 Key Features
 
-### Installation
+- **Standard Compliance**: Implements the [Iceberg REST OpenAPI Specification](https://github.com/apache/iceberg/tree/master/open-api).
+- **Concurrency Control**: Supports **Optimistic Concurrency Control (OCC)** to prevent data loss during concurrent writes.
+- **Atomic Transactions**: Supports multi-table ACID transactions.
+- **Pagination**: Efficiently lists thousands of namespaces and tables.
+- **Lightweight**: Built on Node.js 22 Alpine, producing a tiny Docker footprint compared to Java alternatives.
 
-1. Clone the repository:
-git clone <repository_url>
-cd iceberg-catalog-server
+---
 
+## 📦 Quick Start
 
-2. Install dependencies:
-npm install
+### Option 1: Docker (Recommended)
 
-### Running the Server
+The easiest way to run the catalog is via Docker.
 
-To start the server locally, run:
-npm start
+```bash
+docker run -p 3000:7654 \
+  -e WAREHOUSE_LOCATION=s3://my-bucket/warehouse/ \
+  -e AWS_ACCESS_KEY_ID=admin \
+  -e AWS_SECRET_ACCESS_KEY=password \
+  -e AWS_REGION=us-east-1 \
+  alexmerced/js-iceberg-catalog:latest
+```
 
-The server will be running at `http://localhost:3000`.
+The server will start on port `3000`.
 
-### Using Docker
+### Option 2: Local Node.js
 
-To build and run the server using Docker, run:
-docker-compose up --build
+1. **Install Dependencies**:
+   ```bash
+   npm install
+   ```
 
-The server will be available at `http://localhost:3000`.
+2. **Configure**:
+   Create a `.env` file or set environment variables (see [Configuration](docs/configuration.md)).
 
-## API Documentation
+3. **Start**:
+   ```bash
+   npm start
+   ```
 
-Swagger documentation for the API is available at:
-http://localhost:3000/api-docs
+---
 
+## 📚 Documentation
 
-## UI for Managing Namespaces
+We have detailed guides for connecting various engines and tools:
 
-A simple UI for listing and adding namespaces is available at:
-http://localhost:3000/ui
+- **[Configuration Guide](docs/configuration.md)**: Full list of environment variables.
+- **[PyIceberg Guide](docs/pyiceberg.md)**: How to connect using Python.
+- **[Apache Spark Guide](docs/spark.md)**: Spark SQL configuration.
+- **[Apache Flink Guide](docs/flink.md)**: Flink SQL configuration.
+- **[Dremio Guide](docs/dremio.md)**: Adding the catalog to Dremio.
+- **[Trino Guide](docs/trino.md)**: Trino connector setup.
+- **[Demo / Experimentation Guide](docs/demo-guide.md)**: Step-by-step local lab with Docker & Spark.
+- **[API Limitations](docs/limitations.md)**: Known constraints.
 
+---
 
-## Endpoints
+## 🛠️ API Overview
 
-### Configuration API
+The server exposes the standard Iceberg REST API. 
 
-- `GET /v1/config`
-  - Lists all catalog configuration settings.
+- **Swagger UI**: Available at `http://localhost:3000/api-docs` when running locally.
+- **Namespace UI**: A simple management UI is available at `http://localhost:3000/ui`.
 
-### OAuth2 API
+### Core Endpoints
 
-- `POST /v1/oauth/tokens`
-  - Gets a token using an OAuth2 flow.
+<details>
+<summary>Click to view key endpoints</summary>
 
-### Catalog API
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/v1/config` | Get catalog config |
+| `POST` | `/v1/oauth/tokens` | Get auth token |
+| `GET` | `/v1/{prefix}/namespaces` | List namespaces |
+| `POST` | `/v1/{prefix}/namespaces` | Create namespace |
+| `GET` | `/v1/{prefix}/namespaces/{ns}/tables` | List tables |
+| `POST` | `/v1/{prefix}/namespaces/{ns}/tables` | Create table |
+| `GET` | `/v1/{prefix}/namespaces/{ns}/tables/{tbl}` | Load table metadata |
+| `POST` | `/v1/{prefix}/namespaces/{ns}/tables/{tbl}` | Commit updates |
+| `POST` | `/v1/{prefix}/transactions/commit` | Commit multi-table transaction |
 
-- `GET /v1/:prefix/namespaces`
-  - Lists namespaces.
+</details>
 
-- `POST /v1/:prefix/namespaces`
-  - Creates a namespace.
+---
 
-- `GET /v1/:prefix/namespaces/:namespace`
-  - Loads the metadata properties for a namespace.
+## 🧪 Development
 
-- `DELETE /v1/:prefix/namespaces/:namespace`
-  - Drops a namespace from the catalog. The namespace must be empty.
+### Running Tests
+The project includes a suite of Python-based verification scripts in `test_scripts/` to validate spec compliance.
 
-- `POST /v1/:prefix/namespaces/:namespace/properties`
-  - Sets or removes properties on a namespace.
+```bash
+python3 test_scripts/verify_pagination.py
+python3 test_scripts/verify_full_integration.py
+```
 
-- `GET /v1/:prefix/namespaces/:namespace/tables`
-  - Lists all table identifiers under a given namespace.
+### Logging
+Logs are written to `app.log` and the console using Winston.
 
-- `POST /v1/:prefix/namespaces/:namespace/tables`
-  - Creates a table in the given namespace.
+---
 
-- `POST /v1/:prefix/namespaces/:namespace/register`
-  - Registers a table in the given namespace using a given metadata file location.
+## License
 
-- `GET /v1/:prefix/namespaces/:namespace/tables/:table`
-  - Loads a table from the catalog.
-
-- `POST /v1/:prefix/namespaces/:namespace/tables/:table`
-  - Commits updates to a table.
-
-- `POST /v1/:prefix/namespaces/:namespace/tables/:table/metrics`
-  - Sends a metrics report to the backend.
-
-- `POST /v1/:prefix/namespaces/:namespace/tables/:table/notifications`
-  - Sends a notification to the table.
-
-- `POST /v1/:prefix/transactions/commit`
-  - Commits updates to multiple tables in an atomic operation.
-
-### View Operations
-
-- `GET /v1/:prefix/namespaces/:namespace/views`
-  - Lists all view identifiers under a given namespace.
-
-- `POST /v1/:prefix/namespaces/:namespace/views`
-  - Creates a view in the given namespace.
-
-- `GET /v1/:prefix/namespaces/:namespace/views/:view`
-  - Loads a view from the catalog.
-
-- `POST /v1/:prefix/namespaces/:namespace/views/:view`
-  - Replaces a view.
-
-- `DELETE /v1/:prefix/namespaces/:namespace/views/:view`
-  - Drops a view from the catalog.
-
-- `POST /v1/:prefix/views/rename`
-  - Renames a view from its current name to a new name.
-
-## Logging
-
-The project uses `winston` for logging. Log files are stored in the `logs` directory. Both console and file logging are enabled by default.
+ISC

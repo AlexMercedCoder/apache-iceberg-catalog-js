@@ -8,6 +8,8 @@ const handleError = (res, error, context) => {
     logger.error(`Error ${context}: ${error.message}`);
     if (error.message.includes('exists')) {
         res.status(409).json({ error: { message: error.message, type: "AlreadyExistsException", code: 409 } });
+    } else if (error.code === 409 || error.message.includes('Requirement failed')) {
+        res.status(409).json({ error: { message: error.message, type: "CommitFailedException", code: 409 } });
     } else if (error.message.includes('not found') || error.message.includes('NoSuch')) {
         res.status(404).json({ error: { message: error.message, type: "NotFoundException", code: 404 } });
     } else {
@@ -33,8 +35,8 @@ exports.getToken = async (req, res) => {
 /* --- Namespace --- */
 exports.listNamespaces = async (req, res) => {
   try {
-    const namespaces = await catalogService.listNamespaces(req.query.parent);
-    res.json({ namespaces });
+    const { namespaces, nextPageToken } = await catalogService.listNamespaces(req.query.parent, req.query.pageToken, req.query.pageSize);
+    res.json({ namespaces, "next-page-token": nextPageToken });
   } catch (error) { handleError(res, error, 'listing namespaces'); }
 };
 
@@ -77,8 +79,8 @@ exports.updateProperties = async (req, res) => {
 /* --- Table --- */
 exports.listTables = async (req, res) => {
   try {
-    const tables = await catalogService.listTables(req.params.namespace);
-    res.json({ identifiers: tables });
+    const { identifiers, nextPageToken } = await catalogService.listTables(req.params.namespace, req.query.pageToken, req.query.pageSize);
+    res.json({ identifiers, "next-page-token": nextPageToken });
   } catch (error) { handleError(res, error, 'listing tables'); }
 };
 
@@ -118,7 +120,7 @@ exports.tableExists = async (req, res) => {
 
 exports.updateTable = async (req, res) => {
   try {
-    const result = await catalogService.updateTable(req.params.namespace, req.params.table, req.body.updates || {});
+    const result = await catalogService.updateTable(req.params.namespace, req.params.table, req.body.updates || [], req.body.requirements || []);
     res.json(result);
   } catch (error) { handleError(res, error, 'updating table'); }
 };
@@ -141,13 +143,19 @@ exports.renameTable = async (req, res) => {
 /* --- Misc --- */
 exports.reportMetrics = async (req, res) => { res.sendStatus(204); }
 exports.sendNotification = async (req, res) => { res.sendStatus(204); }
-exports.commitTransaction = async (req, res) => { res.status(501).json({ error: "Not Implemented" }); };
+exports.commitTransaction = async (req, res) => { 
+    try {
+        // Spec: Request body is { "table-changes": [ { identifier, requirements, updates } ] }
+        await catalogService.commitTransaction(req.body['table-changes']);
+        res.sendStatus(204);
+    } catch (error) { handleError(res, error, 'committing transaction'); }
+};
 
 /* --- View --- */
 exports.listViews = async (req, res) => {
   try {
-    const views = await catalogService.listViews(req.params.namespace);
-    res.json({ identifiers: views });
+    const { identifiers, nextPageToken } = await catalogService.listViews(req.params.namespace, req.query.pageToken, req.query.pageSize);
+    res.json({ identifiers, "next-page-token": nextPageToken });
   } catch (error) { handleError(res, error, 'listing views'); }
 };
 
