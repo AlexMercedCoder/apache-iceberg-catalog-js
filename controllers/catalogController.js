@@ -4,222 +4,196 @@ const logger = require('../logger');
 
 exports.getCatalogService = () => catalogService;
 
-exports.getConfig = (req, res) => {
+const handleError = (res, error, context) => {
+    logger.error(`Error ${context}: ${error.message}`);
+    if (error.message.includes('exists')) {
+        res.status(409).json({ error: { message: error.message, type: "AlreadyExistsException", code: 409 } });
+    } else if (error.message.includes('not found') || error.message.includes('NoSuch')) {
+        res.status(404).json({ error: { message: error.message, type: "NotFoundException", code: 404 } });
+    } else {
+        res.status(400).json({ error: { message: error.message, type: "BadRequestException", code: 400 } });
+    }
+};
+
+/* --- Config & Auth --- */
+exports.getConfig = async (req, res) => {
   try {
-    const config = catalogService.getConfig();
+    const config = await catalogService.getConfig();
     res.json(config);
-  } catch (error) {
-    logger.error(`Error getting config: ${error.message}`);
-    res.status(500).json({ error: error.message });
-  }
+  } catch (error) { handleError(res, error, 'getting config'); }
 };
 
-exports.getToken = (req, res) => {
+exports.getToken = async (req, res) => {
   try {
-    const token = catalogService.getToken(req.body);
+    const token = await catalogService.getToken(req.body);
     res.json(token);
-  } catch (error) {
-    logger.error(`Error getting config: ${error.message}`);
-    res.status(500).json({ error: error.message });
-  }
+  } catch (error) { handleError(res, error, 'getting token'); }
 };
 
-exports.listNamespaces = (req, res) => {
+/* --- Namespace --- */
+exports.listNamespaces = async (req, res) => {
   try {
-    const namespaces = catalogService.listNamespaces(req.query.parent);
-    res.json(namespaces);
-  } catch (error) {
-    logger.error(`Error getting config: ${error.message}`);
-    res.status(500).json({ error: error.message });
-  }
+    const namespaces = await catalogService.listNamespaces(req.query.parent);
+    res.json({ namespaces });
+  } catch (error) { handleError(res, error, 'listing namespaces'); }
 };
 
-exports.createNamespace = (req, res) => {
+exports.createNamespace = async (req, res) => {
   try {
-    const namespace = catalogService.createNamespace(req.body.namespace);
+    const result = await catalogService.createNamespace(req.body.namespace);
+    res.json(result);
+  } catch (error) { handleError(res, error, 'creating namespace'); }
+};
+
+exports.loadNamespaceMetadata = async (req, res) => {
+  try {
+    const namespace = await catalogService.loadNamespaceMetadata(req.params.namespace);
     res.json(namespace);
-  } catch (error) {
-    logger.error(`Error getting config: ${error.message}`);
-    res.status(400).json({ error: error.message });
-  }
+  } catch (error) { handleError(res, error, 'loading namespace'); }
 };
 
-exports.loadNamespaceMetadata = (req, res) => {
+exports.namespaceExists = async (req, res) => {
   try {
-    const namespace = catalogService.loadNamespaceMetadata(req.params.namespace);
-    res.json(namespace);
-  } catch (error) {
-    logger.error(`Error getting config: ${error.message}`);
-    res.status(404).json({ error: error.message });
-  }
+    const exists = await catalogService.checkNamespaceExists(req.params.namespace);
+    if (exists) res.sendStatus(204);
+    else res.sendStatus(404);
+  } catch (error) { handleError(res, error, 'checking namespace exists'); }
 };
 
-exports.dropNamespace = (req, res) => {
+exports.dropNamespace = async (req, res) => {
   try {
-    catalogService.dropNamespace(req.params.namespace);
+    await catalogService.dropNamespace(req.params.namespace);
     res.sendStatus(204);
-  } catch (error) {
-    logger.error(`Error getting config: ${error.message}`);
-    res.status(404).json({ error: error.message });
-  }
+  } catch (error) { handleError(res, error, 'dropping namespace'); }
 };
 
-exports.updateProperties = (req, res) => {
+exports.updateProperties = async (req, res) => {
   try {
-    catalogService.updateProperties(req.params.namespace, req.body.updates, req.body.removals);
-    res.sendStatus(200);
-  } catch (error) {
-    logger.error(`Error getting config: ${error.message}`);
-    res.status(400).json({ error: error.message });
-  }
+    const result = await catalogService.updateProperties(req.params.namespace, req.body.updates, req.body.removals);
+    res.json(result);
+  } catch (error) { handleError(res, error, 'updating namespace properties'); }
 };
 
-exports.listTables = (req, res) => {
+/* --- Table --- */
+exports.listTables = async (req, res) => {
   try {
-    const tables = catalogService.listTables(req.params.namespace);
-    res.json(tables);
-  } catch (error) {
-    logger.error(`Error getting config: ${error.message}`);
-    res.status(404).json({ error: error.message });
-  }
+    const tables = await catalogService.listTables(req.params.namespace);
+    res.json({ identifiers: tables });
+  } catch (error) { handleError(res, error, 'listing tables'); }
 };
 
-exports.createTable = (req, res) => {
+exports.createTable = async (req, res) => {
   try {
-    catalogService.createTable(req.params.namespace, req.body.table, req.body.metadata);
-    res.sendStatus(200);
-  } catch (error) {
-    logger.error(`Error getting config: ${error.message}`);
-    res.status(400).json({ error: error.message });
-  }
+    const tableName = req.body.name; 
+    await catalogService.createTable(req.params.namespace, tableName, req.body);
+    const loaded = await catalogService.loadTable(req.params.namespace, tableName);
+    res.json(loaded);
+  } catch (error) { handleError(res, error, 'creating table'); }
 };
 
-exports.registerTable = (req, res) => {
+exports.registerTable = async (req, res) => {
   try {
-    catalogService.registerTable(req.params.namespace, req.body.table, req.body.metadataLocation);
-    res.sendStatus(200);
-  } catch (error) {
-    logger.error(`Error getting config: ${error.message}`);
-    res.status(400).json({ error: error.message });
-  }
+    const tableName = req.body.name;
+    const metaLoc = req.body['metadata-location'];
+    await catalogService.registerTable(req.params.namespace, tableName, metaLoc);
+    const loaded = await catalogService.loadTable(req.params.namespace, tableName);
+    res.json(loaded);
+  } catch (error) { handleError(res, error, 'registering table'); }
 };
 
-exports.loadTable = (req, res) => {
+exports.loadTable = async (req, res) => {
   try {
-    const table = catalogService.loadTable(req.params.namespace, req.params.table);
+    const table = await catalogService.loadTable(req.params.namespace, req.params.table);
     res.json(table);
-  } catch (error) {
-    logger.error(`Error getting config: ${error.message}`);
-    res.status(404).json({ error: error.message });
-  }
+  } catch (error) { handleError(res, error, 'loading table'); }
 };
 
-exports.updateTable = (req, res) => {
+exports.tableExists = async (req, res) => {
   try {
-    catalogService.updateTable(req.params.namespace, req.params.table, req.body.updates);
-    res.sendStatus(200);
-  } catch (error) {
-    logger.error(`Error getting config: ${error.message}`);
-    res.status(400).json({ error: error.message });
-  }
+    const exists = await catalogService.checkTableExists(req.params.namespace, req.params.table);
+    if (exists) res.sendStatus(204);
+    else res.sendStatus(404);
+  } catch (error) { handleError(res, error, 'checking table exists'); }
 };
 
-exports.dropTable = (req, res) => {
+exports.updateTable = async (req, res) => {
   try {
-    catalogService.dropTable(req.params.namespace, req.params.table);
+    const result = await catalogService.updateTable(req.params.namespace, req.params.table, req.body.updates || {});
+    res.json(result);
+  } catch (error) { handleError(res, error, 'updating table'); }
+};
+
+exports.dropTable = async (req, res) => {
+  try {
+    await catalogService.dropTable(req.params.namespace, req.params.table);
     res.sendStatus(204);
-  } catch (error) {
-    logger.error(`Error getting config: ${error.message}`);
-    res.status(404).json({ error: error.message });
-  }
+  } catch (error) { handleError(res, error, 'dropping table'); }
 };
 
-exports.reportMetrics = (req, res) => {
-  try {
-    catalogService.reportMetrics(req.params.namespace, req.params.table, req.body.metrics);
-    res.sendStatus(204);
-  } catch (error) {
-    logger.error(`Error getting config: ${error.message}`);
-    res.status(404).json({ error: error.message });
-  }
+exports.renameTable = async (req, res) => {
+    try {
+        // req.body: { source: Identifier, destination: Identifier }
+        await catalogService.renameTable(req.body.source, req.body.destination);
+        res.sendStatus(204);
+    } catch (error) { handleError(res, error, 'renaming table'); }
 };
 
-exports.sendNotification = (req, res) => {
+/* --- Misc --- */
+exports.reportMetrics = async (req, res) => { res.sendStatus(204); }
+exports.sendNotification = async (req, res) => { res.sendStatus(204); }
+exports.commitTransaction = async (req, res) => { res.status(501).json({ error: "Not Implemented" }); };
+
+/* --- View --- */
+exports.listViews = async (req, res) => {
   try {
-    catalogService.sendNotification(req.params.namespace, req.params.table, req.body.notification);
-    res.sendStatus(204);
-  } catch (error) {
-    logger.error(`Error getting config: ${error.message}`);
-    res.status(404).json({ error: error.message });
-  }
+    const views = await catalogService.listViews(req.params.namespace);
+    res.json({ identifiers: views });
+  } catch (error) { handleError(res, error, 'listing views'); }
 };
 
-exports.commitTransaction = (req, res) => {
+exports.createView = async (req, res) => {
   try {
-    catalogService.commitTransaction(req.body.transactions);
-    res.sendStatus(204);
-  } catch (error) {
-    logger.error(`Error getting config: ${error.message}`);
-    res.status(400).json({ error: error.message });
-  }
+    const viewName = req.body.name; 
+    await catalogService.createView(req.params.namespace, viewName, req.body);
+    const loaded = await catalogService.loadView(req.params.namespace, viewName);
+    res.json(loaded);
+  } catch (error) { handleError(res, error, 'creating view'); }
 };
 
-exports.listViews = (req, res) => {
+exports.loadView = async (req, res) => {
   try {
-    const views = catalogService.listViews(req.params.namespace);
-    res.json(views);
-  } catch (error) {
-    logger.error(`Error getting config: ${error.message}`);
-    res.status(404).json({ error: error.message });
-  }
-};
-
-exports.createView = (req, res) => {
-  try {
-    catalogService.createView(req.params.namespace, req.body.view, req.body.metadata);
-    res.sendStatus(200);
-  } catch (error) {
-    logger.error(`Error getting config: ${error.message}`);
-    res.status(400).json({ error: error.message });
-  }
-};
-
-exports.loadView = (req, res) => {
-  try {
-    const view = catalogService.loadView(req.params.namespace, req.params.view);
+    const view = await catalogService.loadView(req.params.namespace, req.params.view);
     res.json(view);
-  } catch (error) {
-    logger.error(`Error getting config: ${error.message}`);
-    res.status(404).json({ error: error.message });
-  }
+  } catch (error) { handleError(res, error, 'loading view'); }
 };
 
-exports.replaceView = (req, res) => {
+exports.viewExists = async (req, res) => {
   try {
-    catalogService.replaceView(req.params.namespace, req.params.view, req.body.metadata);
-    res.sendStatus(200);
-  } catch (error) {
-    logger.error(`Error getting config: ${error.message}`);
-    res.status(400).json({ error: error.message });
-  }
+    const exists = await catalogService.checkViewExists(req.params.namespace, req.params.view);
+    if (exists) res.sendStatus(204);
+    else res.sendStatus(404);
+  } catch (error) { handleError(res, error, 'checking view exists'); }
 };
 
-exports.dropView = (req, res) => {
+exports.replaceView = async (req, res) => {
   try {
-    catalogService.dropView(req.params.namespace, req.params.view);
+    const viewName = req.params.view;
+    const result = await catalogService.replaceView(req.params.namespace, viewName, req.body);
+    res.json(result);
+  } catch (error) { handleError(res, error, 'replacing view'); }
+};
+
+exports.dropView = async (req, res) => {
+  try {
+    await catalogService.dropView(req.params.namespace, req.params.view);
     res.sendStatus(204);
-  } catch (error) {
-    logger.error(`Error getting config: ${error.message}`);
-    res.status(404).json({ error: error.message });
-  }
+  } catch (error) { handleError(res, error, 'dropping view'); }
 };
 
-exports.renameView = (req, res) => {
+exports.renameView = async (req, res) => {
   try {
-    catalogService.renameView(req.params.namespace, req.body.oldName, req.body.newName);
+     // req.body: { source: Identifier, destination: Identifier }
+    await catalogService.renameView(req.body.source.namespace, req.body.source.name, req.body.destination.name);
     res.sendStatus(204);
-  } catch (error) {
-    logger.error(`Error getting config: ${error.message}`);
-    res.status(400).json({ error: error.message });
-  }
+  } catch (error) { handleError(res, error, 'renaming view'); }
 };

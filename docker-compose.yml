@@ -8,10 +8,43 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=7654
+      - WAREHOUSE_LOCATION=s3://warehouse/
+      - AWS_ACCESS_KEY_ID=admin
+      - AWS_SECRET_ACCESS_KEY=password
+      - AWS_REGION=us-east-1
+      - AWS_S3_ENDPOINT=http://minio:9000
     command: npm start
     container_name: catalog
     networks:
       test-catalog:
+    depends_on:
+      - minio
+
+  minio:
+    image: minio/minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=admin
+      - MINIO_ROOT_PASSWORD=password
+    command: server /data --console-address ":9001"
+    container_name: minio
+    networks:
+      test-catalog:
+
+  mc:
+    image: minio/mc
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set myminio http://minio:9000 admin password &&
+      /usr/bin/mc mb myminio/warehouse || echo 'Bucket exists'
+      "
+    depends_on:
+      - minio
+    networks:
+      test-catalog:
+
   spark:
     platform: linux/x86_64
     image: alexmerced/spark35notebook:latest
@@ -21,11 +54,14 @@ services:
       - 8888:8888  # Notebook
     environment:
       - AWS_REGION=us-east-1
-      - AWS_ACCESS_KEY_ID=admin #minio username
-      - AWS_SECRET_ACCESS_KEY=password #minio password
+      - AWS_ACCESS_KEY_ID=admin
+      - AWS_SECRET_ACCESS_KEY=password
+      - AWS_S3_ENDPOINT=http://minio:9000
     container_name: spark
     networks:
       test-catalog:
+    depends_on:
+      - minio
 
 networks:
   test-catalog:

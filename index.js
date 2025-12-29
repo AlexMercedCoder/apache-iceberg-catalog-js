@@ -5,6 +5,7 @@ const swaggerJsdoc = require('swagger-jsdoc');
 const catalogRoutes = require('./routes/catalog');
 const uiRoutes = require('./routes/ui');
 const logger = require('./logger');
+const catalogController = require('./controllers/catalogController');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -36,7 +37,18 @@ app.use((req, res, next) => {
   next();
 });
 
-app.listen(port, () => {
-  logger.info(`Server running at http://localhost:${port}`);
-});
+// Initialize DB and start server
+(async () => {
+    try {
+        const service = catalogController.getCatalogService();
+        await service.init();
+        logger.info('Database initialized successfully.');
 
+        app.listen(port, () => {
+          logger.info(`Server running at http://localhost:${port}`);
+        });
+    } catch (err) {
+        logger.error(`Failed to initialize database: ${err.message}`);
+        process.exit(1);
+    }
+})();
